@@ -1,0 +1,6 @@
+.agent/
+.idea
+.codex/
+backend/.env
+frontend/node_modules
+frontend/.env
