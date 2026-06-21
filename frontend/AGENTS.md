@@ -18,9 +18,10 @@
 
 - 前端运行配置文件是 `frontend/.env`。
 - 示例配置文件是 `frontend/.env.example`。
-- 当前示例配置包含 `VITE_API_BASE_URL` 和 `VITE_AMAP_WEB_JS_KEY`。
+- 当前示例配置包含 `VITE_API_BASE_URL`、`VITE_AMAP_WEB_JS_KEY` 和 `VITE_AMAP_SECURITY_JS_CODE`。
 - Vite 暴露给浏览器的变量应使用 `VITE_` 前缀。
 - 不要在前端提交真实密钥；前端变量会进入浏览器运行环境。
+- 前端通过 `npm run dev`、`npm run build` 或 `npm run preview` 启动时会覆盖写入 `frontend/runtime.log`。
 
 ## 开发约定
 

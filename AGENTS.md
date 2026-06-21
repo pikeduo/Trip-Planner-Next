@@ -21,6 +21,7 @@
 - 后端使用 `backend/.env` 作为运行配置文件，可参考 `backend/.env.example`。
 - 前端使用 `frontend/.env` 作为运行配置文件，可参考 `frontend/.env.example`。
 - 修改配置项时，应同步检查对应的 `.env.example` 是否需要更新。
+- 后端运行日志写入 `backend/runtime.log`，前端运行日志写入 `frontend/runtime.log`；每次通过项目脚本启动会覆盖上一次日志。
 
 ## 开发约定
 

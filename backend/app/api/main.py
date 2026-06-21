@@ -7,6 +7,7 @@ from app.api.routes import map as map_routes
 from app.api.routes import poi, trip
 from app.core.config import get_settings, validate_config
 from app.core.logging_utils import SEPARATOR, configured, log_section
+from app.services.mcp_client import close_amap_mcp_client
 
 settings = get_settings()
 
@@ -48,6 +49,12 @@ async def startup_event():
     print(f"📚 API文档: http://localhost:{settings.port}/docs")
     print(f"📖 ReDoc文档: http://localhost:{settings.port}/redoc")
     print(SEPARATOR)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await close_amap_mcp_client()
+    print("✅ MCP 客户端已关闭")
 
 
 @app.get("/")

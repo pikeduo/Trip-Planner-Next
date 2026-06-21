@@ -1,9 +1,11 @@
 """MCP client helpers for AMap tools."""
 
+import asyncio
 import json
 import re
 import shutil
 import sys
+from contextlib import AsyncExitStack
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -17,6 +19,14 @@ from app.core.logging_utils import configured, preview
 from app.models.schemas import Location, POIInfo, RouteInfo, WeatherInfo
 
 
+class AmapMCPUnavailableError(RuntimeError):
+    """Raised when the AMap MCP server cannot be started or reached."""
+
+
+class AmapMCPToolError(RuntimeError):
+    """Raised when the MCP server is available but a tool returns an error."""
+
+
 def _find_amap_mcp_command() -> tuple[str, List[str]]:
     executable_dir = Path(sys.executable).resolve().parent
     executable_name = "amap-mcp-server.exe" if sys.platform.startswith("win") else "amap-mcp-server"
@@ -28,24 +38,31 @@ def _find_amap_mcp_command() -> tuple[str, List[str]]:
     for local_server in local_candidates:
         if local_server.exists():
             return str(local_server), ["stdio"]
+
     resolved_server = shutil.which("amap-mcp-server")
     if resolved_server:
         return resolved_server, ["stdio"]
+
     resolved_uvx = shutil.which("uvx")
     if resolved_uvx:
         return resolved_uvx, ["amap-mcp-server", "stdio"]
+
     return "uvx", ["amap-mcp-server", "stdio"]
+
+
+def _command_preview(command: str, args: List[str]) -> str:
+    return " ".join([command, *args]).strip()
 
 
 def _amap_mcp_config() -> dict:
     settings = get_settings()
     command, args = _find_amap_mcp_command()
     command_exists = Path(command).exists() or shutil.which(command) is not None
-    print("  - 创建共享MCP工具...")
+    print("  - 创建共享 MCP 工具...")
     print(f"🔑 使用环境变量: AMAP_MAPS_API_KEY={configured(settings.amap_maps_api_key)}")
-    print(f"📝 使用 Stdio 传输 (命令): {command} {' '.join(args)}")
+    print(f"📝 使用 Stdio 传输 (命令): {_command_preview(command, args)}")
     if not command_exists:
-        print(f"⚠️ 未找到 MCP 启动命令: {command}, 将在工具调用时使用高德 REST API 兜底")
+        print(f"⚠️ 未找到 MCP 启动命令: {command}，工具调用时将使用高德 REST API 兜底")
     return {
         "amap": {
             "transport": "stdio",
@@ -66,16 +83,121 @@ def get_mcp_server_params() -> StdioServerParameters:
     )
 
 
-async def get_mcp_tools():
-    print("🔗 连接到 MCP 服务器并加载工具...")
-    async with stdio_client(get_mcp_server_params()) as (read, write):
-        async with ClientSession(read, write) as session:
+def parse_jsonish(raw: Any) -> Any:
+    if raw is None:
+        return None
+    if isinstance(raw, (dict, list)):
+        return raw
+    text = str(raw)
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    match = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except Exception:
+            return {"raw": text}
+    return {"raw": text}
+
+
+def _decode_mcp_result(result: Any) -> Any:
+    if getattr(result, "isError", False):
+        raise AmapMCPToolError(f"MCP tool returned error: {getattr(result, 'content', result)}")
+
+    structured_content = getattr(result, "structuredContent", None)
+    if structured_content:
+        value = structured_content.get("result", structured_content)
+    else:
+        content = getattr(result, "content", None)
+        if content:
+            value = "\n".join(getattr(item, "text", str(item)) for item in content)
+        else:
+            value = result
+
+    parsed = parse_jsonish(value)
+    if isinstance(parsed, dict) and parsed.get("error"):
+        raise AmapMCPToolError(str(parsed["error"]))
+    return parsed if isinstance(parsed, (dict, list)) else value
+
+
+class AmapMCPClient:
+    """Reuse one stdio MCP session so calls behave like the reference MCPTool."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._exit_stack: Optional[AsyncExitStack] = None
+        self._session: Optional[ClientSession] = None
+        self._tools: List[Any] = []
+
+    async def _connect_locked(self) -> None:
+        if self._session is not None:
+            return
+
+        params = get_mcp_server_params()
+        print("🔗 连接到 MCP 服务器并加载工具...")
+        print(f"   MCP 启动命令: {_command_preview(params.command, list(params.args or []))}")
+
+        stack = AsyncExitStack()
+        try:
+            read, write = await stack.enter_async_context(stdio_client(params))
+            session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
-            result = await session.list_tools()
-            tools = result.tools
-    print(f"✅ MCP 工具加载完成: {len(tools)} 个")
-    print(f"   工具列表: {', '.join(tool.name for tool in tools) if tools else '无'}")
-    return tools
+            tools_result = await session.list_tools()
+        except Exception as exc:
+            await stack.aclose()
+            raise AmapMCPUnavailableError(f"MCP server unavailable: {exc}") from exc
+
+        self._exit_stack = stack
+        self._session = session
+        self._tools = tools_result.tools
+        print(f"✅ MCP 工具加载完成: {len(self._tools)} 个")
+        print(f"   工具列表: {', '.join(tool.name for tool in self._tools) if self._tools else '无'}")
+
+    async def list_tools(self) -> List[Any]:
+        async with self._lock:
+            await self._connect_locked()
+            return list(self._tools)
+
+    async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
+        async with self._lock:
+            await self._connect_locked()
+            assert self._session is not None
+
+            available_tools = [tool.name for tool in self._tools]
+            matched_tool = next(
+                (name for name in available_tools if name == tool_name or name.endswith(tool_name)),
+                None,
+            )
+            if not matched_tool:
+                available = ", ".join(available_tools)
+                raise AmapMCPToolError(f"MCP tool not found: {tool_name}. Available tools: {available}")
+
+            print(f"   MCP 命中工具: {matched_tool}")
+            try:
+                result = await self._session.call_tool(matched_tool, arguments)
+                return _decode_mcp_result(result)
+            except AmapMCPToolError:
+                raise
+            except Exception as exc:
+                await self.close()
+                raise AmapMCPUnavailableError(f"MCP call failed: {exc}") from exc
+
+    async def close(self) -> None:
+        stack = self._exit_stack
+        self._exit_stack = None
+        self._session = None
+        self._tools = []
+        if stack is not None:
+            await stack.aclose()
+
+
+_amap_mcp_client = AmapMCPClient()
+
+
+async def get_mcp_tools():
+    return await _amap_mcp_client.list_tools()
 
 
 async def get_amap_tool_node():
@@ -114,34 +236,23 @@ async def call_amap_tool(tool_name: str, arguments: Dict[str, Any]) -> Any:
         print(f"✅ MCP 工具调用成功: {tool_name}")
         print(f"   结果预览: {preview(result)}")
         return result
+    except AmapMCPToolError as exc:
+        print(f"⚠️ MCP 工具返回业务错误，尝试高德 REST API 兜底: {exc}")
+        return await call_amap_rest_fallback(tool_name, arguments)
+    except AmapMCPUnavailableError as exc:
+        print(f"⚠️ MCP 连接或调用不可用，尝试高德 REST API 兜底: {exc}")
+        return await call_amap_rest_fallback(tool_name, arguments)
     except Exception as exc:
-        print(f"⚠️ MCP 调用不可用, 尝试高德 REST API 兜底: {exc}")
+        print(f"⚠️ MCP 调用异常，尝试高德 REST API 兜底: {exc}")
         return await call_amap_rest_fallback(tool_name, arguments)
 
 
 async def call_amap_mcp_tool(tool_name: str, arguments: Dict[str, Any]) -> Any:
-    async with stdio_client(get_mcp_server_params()) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools = await session.list_tools()
-            available_tools = [tool.name for tool in tools.tools]
-            matched_tool = next(
-                (name for name in available_tools if name == tool_name or name.endswith(tool_name)),
-                None,
-            )
-            if not matched_tool:
-                available = ", ".join(available_tools)
-                raise ValueError(f"MCP tool not found: {tool_name}. Available tools: {available}")
-            result = await session.call_tool(matched_tool, arguments)
-            if getattr(result, "isError", False):
-                raise ValueError(f"MCP tool returned error: {result.content}")
-            structured_content = getattr(result, "structuredContent", None)
-            if structured_content:
-                return structured_content.get("result", structured_content)
-            content = getattr(result, "content", None)
-            if content:
-                return "\n".join(getattr(item, "text", str(item)) for item in content)
-            return result
+    return await _amap_mcp_client.call_tool(tool_name, arguments)
+
+
+async def close_amap_mcp_client() -> None:
+    await _amap_mcp_client.close()
 
 
 def _amap_rest_key() -> str:
@@ -202,25 +313,6 @@ async def call_amap_rest_fallback(tool_name: str, arguments: Dict[str, Any]) -> 
     if tool_name.endswith("maps_search_detail") or tool_name == "maps_search_detail":
         return await _amap_search_detail(arguments)
     raise ValueError(f"暂无高德 REST API 兜底实现: {tool_name}")
-
-
-def parse_jsonish(raw: Any) -> Any:
-    if raw is None:
-        return None
-    if isinstance(raw, (dict, list)):
-        return raw
-    text = str(raw)
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
-    match = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except Exception:
-            return {"raw": text}
-    return {"raw": text}
 
 
 def _first_list(data: Any, keys: List[str]) -> List[Any]:
