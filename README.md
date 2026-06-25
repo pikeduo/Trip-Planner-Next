@@ -71,3 +71,76 @@ npm run dev
 - `POST /api/map/route`
 - `GET /api/poi/detail/{poi_id}`
 - `GET /api/poi/photo`
+
+## 目录结构
+
+```p
+Trip-Planner-Next
+│
+├── frontend
+│   │
+│   ├── main.ts
+│   │   └── 注册 Vue、Router、Ant Design Vue
+│   │
+│   ├── App.vue
+│   │   └── 页面整体布局
+│   │
+│   ├── views
+│   │   ├── Home.vue
+│   │   │   └── 用户输入旅行需求
+│   │   │
+│   │   └── Result.vue
+│   │       └── 展示行程、地图、预算、天气、编辑、导出
+│   │
+│   ├── services/api.ts
+│   │   └── axios 调用后端接口
+│   │
+│   └── types/index.ts
+│       └── 前端 TypeScript 类型
+│
+└── backend
+    │
+    ├── run.py
+    │   └── 启动 FastAPI
+    │
+    ├── app/api/main.py
+    │   └── 创建 FastAPI app，注册路由
+    │
+    ├── app/api/routes
+    │   ├── trip.py
+    │   │   └── POST /api/trip/plan
+    │   │
+    │   ├── map.py
+    │   │   └── POI、天气、路线、静态地图
+    │   │
+    │   └── poi.py
+    │       └── POI 详情、景点图片
+    │
+    ├── app/graph
+    │   ├── state.py
+    │   │   └── LangGraph 状态
+    │   │
+    │   ├── prompts.py
+    │   │   └── LLM 提示词
+    │   │
+    │   └── trip_graph.py
+    │       └── 旅行规划工作流
+    │
+    ├── app/services
+    │   ├── llm.py
+    │   │   └── LLM 客户端
+    │   │
+    │   ├── mcp_client.py
+    │   │   └── 高德 MCP / REST 兜底
+    │   │
+    │   └── image_service.py
+    │       └── 景点图片搜索
+    │
+    ├── app/models/schemas.py
+    │   └── Pydantic 数据结构
+    │
+    └── app/utils
+        ├── date_utils.py
+        └── json_utils.py
+```
+
